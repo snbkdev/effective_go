@@ -1,0 +1,63 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"sync"
+)
+
+var db *sql.DB
+var cache = map[string]Person{}
+var cacheMutex = &sync.Mutex{}
+
+func loadRecord(ctx context.Context, wg *sync.WaitGroup, semaphoreCh chan struct{}, errorCh chan error, name string) {
+	defer func() {
+		<- semaphoreCh
+
+		wg.Done()
+	}()
+
+	semaphoreCh <- struct{}{}
+
+	result := db.QueryRowContext(ctx, "select user, host from user where user = ?", name)
+
+	person := &Person{}
+	err := result.Scan(person.Name, person.Host)
+	if err != nil {
+		select {
+		case errorCh <- err:
+			//
+		default:
+			//
+		}
+		return
+	}
+
+	cacheMutex.Lock()
+	cache[name] = *person
+	cacheMutex.Unlock()
+}
+
+func RefreshPeopleCache(ctx context.Context, names []string) error {
+	errorCh := make(chan error, 1)
+
+	wg := &sync.WaitGroup{}
+
+	semaphoreCh := make(chan struct{}, 3)
+
+	for _, name := range names {
+		wg.Add(1)
+		go loadRecord(ctx, wg, semaphoreCh, errorCh, name)
+	}
+
+	wg.Wait()
+
+	close(errorCh)
+
+	return <- errorCh
+}
+
+type Person struct {
+	Name string
+	Host string
+}
